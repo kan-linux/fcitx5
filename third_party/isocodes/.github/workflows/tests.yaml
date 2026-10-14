@@ -1,0 +1,156 @@
+name: Test iso-codes and build
+on:
+  pull_request:
+  # Also on push to main, so a direct push cannot land untested. Matches the
+  # coverage workflow, which already ran on both.
+  push:
+    branches: ["main"]
+  # Called by the release workflow, so a tag cannot reach PyPI untested.
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      publish_to_testpypi:
+        description: 'Publish to TestPyPI with dev version'
+        required: false
+        default: false
+        type: boolean
+      version_suffix:
+        description: 'Version suffix for TestPyPI (e.g., dev1, rc1)'
+        required: false
+        default: 'dev1'
+jobs:
+  test:
+    name: Run tests on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.13t"
+          - "3.14"
+          - "3.14t"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install uv and set the python version
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the test group dependencies
+        run: uv sync --group test
+      - name: Run Tox
+        env:
+          # Passed through the environment rather than interpolated into the
+          # shell. "3.13t" becomes "py313t", matching the names in tox.ini, so
+          # local runs and CI use the same environments.
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: uv run tox -e "py${PYTHON_VERSION//./}"
+  build:
+    name: Build package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Build wheel
+        run: uv build
+      - name: Install twine for validation
+        run: uv tool install twine
+      - name: Test build integrity
+        run: |
+          uv tool run twine check dist/*
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  test-publish:
+    name: Test publish to TestPyPI
+    # Every push to main gets a dev release on TestPyPI, so packaging and the
+    # publish credentials are exercised before a tag reaches the real PyPI.
+    # Manual runs still have to opt in, and bring their own suffix.
+    # Both arms are false when the release workflow calls this one, where the
+    # event is 'release': a release must not divert to TestPyPI on its way to
+    # PyPI. The ref check keeps that true even if the caller is ever triggered
+    # by a tag push again, which would also arrive as event_name 'push'.
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'workflow_dispatch' && inputs.publish_to_testpypi)
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Generate test version
+        id: version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SUFFIX_OVERRIDE: >-
+            ${{ github.event_name == 'workflow_dispatch'
+            && inputs.version_suffix || '' }}
+        run: |
+          BASE_VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
+          if [ -n "${SUFFIX_OVERRIDE}" ]; then
+            SUFFIX="${SUFFIX_OVERRIDE}"
+          else
+            # TestPyPI refuses a version it already holds, and re-running a
+            # workflow keeps its run number. Folding in the attempt keeps the
+            # suffix unique across re-runs while still rising with every build.
+            SUFFIX="dev$(( RUN_NUMBER * 1000 + RUN_ATTEMPT ))"
+          fi
+          TEST_VERSION="${BASE_VERSION}.${SUFFIX}"
+          echo "version=${TEST_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Generated test version: ${TEST_VERSION}"
+      - name: Update version for testing
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+      - name: Build wheel
+        run: uv build
+      - name: Publish to TestPyPI
+        # No --check-url here: uv rejects it alongside --index, and derives the
+        # check from the index's own url anyway. That check compares hashes
+        # rather than just names, and a rebuilt wheel is not byte-identical, so
+        # a repeat version errors instead of being skipped. The attempt-aware
+        # suffix above is what keeps re-runs working.
+        run: uv publish --index testpypi
+      - name: Test installation
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          uv venv /tmp/verify
+          # A fresh upload takes a moment to become installable, and the length
+          # of that moment is not ours to predict. --refresh-package stops uv
+          # serving the earlier "not found" back to us from its cache.
+          installed=false
+          for attempt in $(seq 1 8); do
+            if uv pip install \
+                 --python /tmp/verify/bin/python \
+                 --default-index https://test.pypi.org/simple/ \
+                 --refresh-package isocodes \
+                 "isocodes==${VERSION}"; then
+              installed=true
+              break
+            fi
+            echo "isocodes ${VERSION} not on TestPyPI yet (attempt ${attempt}); waiting 15s"
+            sleep 15
+          done
+          if [ "${installed}" != true ]; then
+            echo "isocodes ${VERSION} never became installable from TestPyPI"
+            exit 1
+          fi
+          /tmp/verify/bin/python -c "from isocodes import countries; print(countries.get(alpha_2='US'))"
