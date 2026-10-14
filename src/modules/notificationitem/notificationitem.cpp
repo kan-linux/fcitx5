@@ -182,31 +182,39 @@ public:
     }
 
     // Update the cached icon pixmap, return whether we have a valid icon.
+    // Always generate a text-based pixmap so SNI hosts have a fallback when
+    // IconName (e.g. "input-keyboard-symbolic") is not in the icon theme.
     bool updateCachedIconPixmap() {
         auto *classicui = parent_->classicui();
         if (!classicui) {
             return false;
         }
-        std::vector<dbus::DBusStruct<int, int, std::vector<uint8_t>>> result;
-        const auto label = labelText();
-        if (!label.empty() && cachedLabel_ != label) {
-            for (unsigned int size : {16, 22, 32, 48}) {
-                // swap to network byte order if we are little endian
-                auto data = classicui->call<IClassicUI::labelIcon>(label, size);
-                if (isLittleEndian()) {
-                    auto *uintBuf = reinterpret_cast<uint32_t *>(data.data());
-                    for (size_t i = 0; i < data.size() / sizeof(uint32_t);
-                         ++i) {
-                        *uintBuf = htobe32(*uintBuf);
-                        ++uintBuf;
-                    }
-                }
-                result.emplace_back(size, size, std::move(data));
-            }
-            cachedLabel_ = label;
-            cachedLabelIcon_ = result;
+        // Use label if available (e.g. "en", "拼"), otherwise fall back to
+        // the title so we always have something to render.
+        auto label = labelText();
+        if (label.empty()) {
+            label = title();
         }
-        return !cachedLabel_.empty();
+        if (label.empty() || cachedLabel_ == label) {
+            return !cachedLabel_.empty();
+        }
+        std::vector<dbus::DBusStruct<int, int, std::vector<uint8_t>>> result;
+        for (unsigned int size : {16, 22, 32, 48}) {
+            // swap to network byte order if we are little endian
+            auto data = classicui->call<IClassicUI::labelIcon>(label, size);
+            if (isLittleEndian()) {
+                auto *uintBuf = reinterpret_cast<uint32_t *>(data.data());
+                for (size_t i = 0; i < data.size() / sizeof(uint32_t);
+                     ++i) {
+                    *uintBuf = htobe32(*uintBuf);
+                    ++uintBuf;
+                }
+            }
+            result.emplace_back(size, size, std::move(data));
+        }
+        cachedLabel_ = label;
+        cachedLabelIcon_ = result;
+        return true;
     }
 
     std::vector<dbus::DBusStruct<int, int, std::vector<uint8_t>>> iconPixmap() {
