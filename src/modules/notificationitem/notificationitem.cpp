@@ -101,13 +101,11 @@ public:
     }
 
     std::string iconNamePropertyImpl() {
-        std::string label;
-        std::string icon;
-        if (auto *ic = parent_->menu()->lastRelevantIc()) {
-            label = parent_->instance()->inputMethodLabel(ic);
-            icon = parent_->instance()->inputMethodIcon(ic);
-        }
-        return preferTextIcon(label, icon) ? "" : iconName();
+        // Always return an icon name so SNI tray hosts can render it.
+        // preferTextIcon() is a classicui display preference and must not
+        // blank the IconName property (omarchy tray renders an empty source
+        // as nothing, hiding the icon in English/keyboard mode).
+        return iconName();
     }
 
     std::string label() { return ""; }
