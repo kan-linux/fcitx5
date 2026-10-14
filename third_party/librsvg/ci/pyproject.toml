@@ -1,0 +1,12 @@
+# Configuration for the Ruff linter for Python.
+#
+# Repository: https://github.com/astral-sh/ruff
+#
+# Documentation: https://beta.ruff.rs/docs/
+[tool.ruff]
+line-length = 100  # same as rustfmt
+
+[tool.ruff.lint]
+ignore = [
+  "TRY002",      # simple scripts use Exception("custom data here") rather than defining a custom exception
+]
